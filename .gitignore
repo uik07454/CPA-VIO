@@ -1,0 +1,25 @@
+# Pycache
+__pycache__/
+
+# VS code
+.vscode/
+
+# Output
+output/
+
+# Misc
+misc/
+
+# Test
+tests/
+
+# Data files
+data/
+
+# Assets
+assets/
+
+# Build artifacts
+build/
+dist/
+.build_venv/
