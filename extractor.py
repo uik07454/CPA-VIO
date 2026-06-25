@@ -20,6 +20,8 @@ from para_utils import (
     TRANSPARENT_TAGS,
     unwrap_sdts,
     get_ppr_style_change,
+    is_caption_paragraph,
+    should_skip_paragraph,
     handle_del,
     handle_ins,
     handle_run,
@@ -66,12 +68,23 @@ def _extract_embedded_container_changes(
     registry: list[ContainerDescriptor] = _BODY_CONTAINER_REGISTRY,
     image_map: dict[str, bytes] = {},
 ) -> list[ChangeRecord]:
-    """Scan element for embedded text containers and extract tracked changes from their paragraphs."""
+    """Scan element for embedded text containers and extract tracked changes from their paragraphs.
+
+    Paragraphs that live inside a textbox which is itself under a tracked
+    insertion or deletion are skipped — the object-level record already covers
+    the entire textbox change, so emitting content records too would be
+    duplicate reporting.
+    """
     records = []
     for descriptor in registry:
         for container in element.findall(descriptor.xpath, NS):
             heading = f"{current_heading} - {descriptor.label}"
             for para in container.findall(".//w:p", NS):
+                # Skip paragraphs whose containing textbox is itself inserted/deleted.
+                # The object-level record (Add/Delete Object) already represents
+                # this change; content records here would be duplicates.
+                if should_skip_paragraph(para):
+                    continue
                 para_records = extract_changes_from_paragraph(para, current_heading=heading, image_map=image_map)
                 for rec in para_records:
                     rec.target_element = para  # pinpoint bookmark to the textbox paragraph
@@ -99,6 +112,9 @@ def extract_changes_from_paragraph(
     anything else   -> skip
     """
     records = []
+
+    # ---- Detect caption paragraph once; stamp all records produced below ----
+    _is_caption = is_caption_paragraph(para)
 
     # ---- Paragraph-level style change (w:pPrChange) ------------------------
     style_change = get_ppr_style_change(para)
@@ -146,6 +162,16 @@ def extract_changes_from_paragraph(
         i += 1  # unrecognised tag — skip
 
     flush_rpr_buffer(rpr_buffer, current_heading, records)
+
+    # ---- Stamp caption flag and reclassify caption records -----------------
+    # All records produced from a caption paragraph are marked is_caption=True
+    # and their change_type is overridden to CAPTION_CHANGE so they can be
+    # independently toggled in the GUI / filtered by AppConfig.filter_records().
+    if _is_caption:
+        for rec in records:
+            rec.is_caption = True
+            rec.change_type = ChangeType.CAPTION_CHANGE
+
     return records
 
 
@@ -193,7 +219,7 @@ def extract_tracked_changes(
 
             embedded = _extract_embedded_container_changes(child, current_heading, image_map=image_map)
             if embedded:
-                target_to_bm: dict[int, str] = {}
+                target_to_bm: dict[int, int] = {}
                 for rec in embedded:
                     if rec.target_element is None:
                         rec.target_element = child
@@ -214,7 +240,7 @@ def extract_tracked_changes(
             tbl_anchor = first_para_in_tr(first_tr) if first_tr is not None else None
             embedded = _extract_embedded_container_changes(child, current_heading, image_map=image_map)
             if embedded:
-                target_to_bm: dict[int, str] = {}
+                target_to_bm: dict[int, int] = {}
                 for rec in embedded:
                     if rec.target_element is None:
                         rec.target_element = tbl_anchor

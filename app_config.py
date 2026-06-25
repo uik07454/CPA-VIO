@@ -79,6 +79,11 @@ class AppConfig:
     include_hf_changes: bool = True
     include_sdt:        bool = True
 
+    # ---- Caption Change Filtering -------------------------------------------
+    # When False (default), records whose change_type is CAPTION_CHANGE are
+    # removed from the output.  Set to True to include caption changes.
+    include_caption_changes: bool = False
+
     # ---- Template Output Settings -------------------------------------------
     # "scratch" → generate a new workbook; "template" → copy a template file.
     output_mode: str = OUTPUT_MODE_SCRATCH
@@ -93,6 +98,13 @@ class AppConfig:
 
     # Selected sheet name per template: {filename: sheet_name}
     template_selected_sheets: dict[str, str] = field(default_factory=dict)
+
+    # ---- Delete Toggle Settings ---------------------------------------------
+    # Enable the delete toggle column in Excel output
+    enable_delete_toggle: bool = False
+    
+    # Excel column letter for the delete toggle column (default "E")
+    delete_toggle_column: str = "E"
 
     def validate(self) -> list[str]:
         """
@@ -151,10 +163,13 @@ class AppConfig:
             "selected_change_types":    sorted(self.selected_change_types),
             "include_hf_changes":       self.include_hf_changes,
             "include_sdt":              self.include_sdt,
+            "include_caption_changes":  self.include_caption_changes,
             "output_mode":              self.output_mode,
             "selected_template":        self.selected_template,
             "template_profiles":        self.template_profiles,
             "template_selected_sheets": self.template_selected_sheets,
+            "enable_delete_toggle":     self.enable_delete_toggle,
+            "delete_toggle_column":     self.delete_toggle_column,
         }
         path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -177,12 +192,15 @@ class AppConfig:
         if saved_types is not None:
             # Only keep types that still exist in the current registry.
             cfg.selected_change_types = set(saved_types) & ALL_CHANGE_TYPES
-        cfg.include_hf_changes = raw.get("include_hf_changes", cfg.include_hf_changes)
-        cfg.include_sdt        = raw.get("include_sdt",        cfg.include_sdt)
-        cfg.output_mode        = raw.get("output_mode",        cfg.output_mode)
+        cfg.include_hf_changes      = raw.get("include_hf_changes",      cfg.include_hf_changes)
+        cfg.include_sdt             = raw.get("include_sdt",             cfg.include_sdt)
+        cfg.include_caption_changes = raw.get("include_caption_changes",  cfg.include_caption_changes)
+        cfg.output_mode             = raw.get("output_mode",             cfg.output_mode)
         cfg.selected_template  = raw.get("selected_template",  cfg.selected_template)
         cfg.template_profiles         = raw.get("template_profiles",         cfg.template_profiles)
         cfg.template_selected_sheets  = raw.get("template_selected_sheets",  cfg.template_selected_sheets)
+        cfg.enable_delete_toggle = raw.get("enable_delete_toggle", cfg.enable_delete_toggle)
+        cfg.delete_toggle_column = raw.get("delete_toggle_column", cfg.delete_toggle_column)
         return cfg
 
     def reset_to_default(self) -> None:
@@ -199,6 +217,7 @@ class AppConfig:
         self.selected_change_types  = set(ALL_CHANGE_TYPES)
         self.include_hf_changes     = default.include_hf_changes
         self.include_sdt            = default.include_sdt
+        self.include_caption_changes = default.include_caption_changes
         # output_mode, selected_template, and template_profiles are intentionally
         # NOT reset — user-defined column mappings should survive a settings reset.
 
@@ -224,7 +243,23 @@ class AppConfig:
         """
         Return only the records whose change_type is selected or is UNKNOWN.
 
-        UNKNOWN is always passed through so reviewers never miss unclassified changes.
+        Filtering rules (applied in order):
+          1. Caption records (``r.is_caption is True``) are removed when
+             ``include_caption_changes`` is ``False``, regardless of
+             ``selected_change_types``.  This gives a dedicated on/off switch
+             for captions that is independent of the change-type checkboxes.
+          2. Records whose ``change_type`` is not in ``selected_change_types``
+             are removed, **except** for ``ChangeType.UNKNOWN`` which always
+             passes through so reviewers never miss unclassified changes.
         """
         allowed = self.selected_change_types | {ChangeType.UNKNOWN}
-        return [r for r in records if r.change_type in allowed]
+        result = []
+        for r in records:
+            # Rule 1 — caption gate
+            if getattr(r, "is_caption", False) and not self.include_caption_changes:
+                continue
+            # Rule 2 — change-type selection gate
+            if r.change_type not in allowed:
+                continue
+            result.append(r)
+        return result

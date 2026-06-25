@@ -71,8 +71,8 @@ EMU_PER_PT = 12700
 # ---- Output / Excel rendering ----------------------------------------------
 
 # Dimensions (in pixels) for embedded images in Excel cells.
-IMAGE_WIDTH_PX  = 380
-IMAGE_HEIGHT_PX = 380
+IMAGE_WIDTH_PX  = 450
+IMAGE_HEIGHT_PX = 450
 
 # Colours used for inline diff highlighting in "Modify Content" rows.
 DIFF_DEL_COLOR = "FF0000"
@@ -233,6 +233,9 @@ class ChangeType:
     ADD_NOTE    = "Add Note"
     DELETE_NOTE = "Delete Note"
 
+    # ---- Caption changes ----------------------------------------------------
+    CAPTION_CHANGE = "Caption Change"
+
     # ---- Table structure ----------------------------------------------------
     ADD_TABLE    = "Add Table"
     DELETE_TABLE = "Delete Table"
@@ -280,6 +283,9 @@ CHANGE_TYPE_CATEGORIES: dict[str, list[str]] = {
     "Note Changes": [
         ChangeType.ADD_NOTE,
         ChangeType.DELETE_NOTE,
+    ],
+    "Caption Changes": [
+        ChangeType.CAPTION_CHANGE,
     ],
     "Table Changes": [
         ChangeType.ADD_TABLE,

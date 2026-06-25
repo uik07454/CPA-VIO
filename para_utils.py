@@ -10,6 +10,8 @@ Public API used by extractor.py:
     - unwrap_sdts               -- replace <w:sdt> with its content children
     - next_non_transparent      -- find next non-bookkeeping sibling
     - get_ppr_style_change      -- detect paragraph style changes
+    - is_caption_paragraph      -- True if paragraph uses the "Caption" style
+    - should_skip_paragraph     -- True if paragraph is inside a tracked textbox
     - collect_consecutive_del   -- collect text + objects from consecutive <w:del>
     - collect_consecutive_ins   -- collect text + objects from consecutive <w:ins>
     - handle_del                -- emit records for a del group (pairs with ins)
@@ -88,6 +90,96 @@ def get_ppr_style_change(para) -> tuple[str, str] | None:
     if old_style == new_style:
         return None  # style didn't actually change — ignore
     return old_style, new_style
+
+
+# ---- Caption paragraph detection -------------------------------------------
+
+# Style IDs that Word uses for caption paragraphs.  The primary built-in value
+# is "Caption"; some documents use localised variants (e.g. "Bildunterschrift").
+# Extend this set if additional caption style IDs need to be recognised.
+_CAPTION_STYLE_IDS: frozenset[str] = frozenset({"Caption"})
+
+
+def is_caption_paragraph(para: etree._Element) -> bool:
+    """Return True if *para* is styled as a caption paragraph.
+
+    Checks the current paragraph style (``<w:pStyle w:val="...">`` inside
+    ``<w:pPr>``).  Does **not** look inside ``<w:pPrChange>`` — we care about
+    what the paragraph *is now*, not what it used to be.
+
+    Args:
+        para: A ``<w:p>`` lxml element.
+
+    Returns:
+        ``True`` when the paragraph style ID matches a known caption style.
+    """
+    pPr = para.find("w:pPr", NS)
+    if pPr is None:
+        return False
+    pStyle = pPr.find("w:pStyle", NS)
+    if pStyle is None:
+        return False
+    style_val = pStyle.get(NSC["w"] + "val", "")
+    return style_val in _CAPTION_STYLE_IDS
+
+
+# ---- Textbox-inside-tracked-change detection --------------------------------
+
+def should_skip_paragraph(para: etree._Element) -> bool:
+    """Return True when *para* is inside a textbox that is itself under a
+    tracked insertion or deletion.
+
+    When a textbox is inserted (``<w:ins>…<w:drawing>…<wps:txbx>…</w:ins>``)
+    or deleted (``<w:del>…``), the object-level record is already emitted by
+    ``handle_ins`` / ``handle_del`` via ``emit_object_records``.  Walking the
+    textbox paragraphs again through ``_extract_embedded_container_changes``
+    would produce duplicate content-level records.  This guard prevents that.
+
+    Detection strategy (no XPath ancestor axis needed):
+      1. Walk up the element tree from *para*.
+      2. If we reach a ``<wps:txbx>`` or ``<w:txbxContent>`` ancestor, we are
+         inside a textbox.
+      3. Continue walking up from that textbox anchor.  If we reach a ``<w:ins>``
+         or ``<w:del>`` before hitting the document body, the textbox itself is
+         under a tracked change → skip.
+
+    Args:
+        para: A ``<w:p>`` lxml element.
+
+    Returns:
+        ``True`` when the paragraph should be skipped to avoid duplicate records.
+    """
+    TEXTBOX_TAGS  = frozenset({"txbx", "txbxContent"})
+    TRACKED_TAGS  = frozenset({"ins", "del"})
+    BODY_TAGS     = frozenset({"body", "hdr", "ftr"})
+
+    # Walk up to find a textbox ancestor
+    node = para.getparent()
+    textbox_anchor = None
+    while node is not None:
+        local = etree.QName(node.tag).localname
+        if local in TEXTBOX_TAGS:
+            textbox_anchor = node
+            break
+        if local in BODY_TAGS:
+            # Reached document body without finding a textbox — not inside one
+            return False
+        node = node.getparent()
+
+    if textbox_anchor is None:
+        return False  # not inside any textbox
+
+    # Now walk up from the textbox anchor to see if it sits inside w:ins/w:del
+    node = textbox_anchor.getparent()
+    while node is not None:
+        local = etree.QName(node.tag).localname
+        if local in TRACKED_TAGS:
+            return True   # textbox is inside a tracked change → skip paragraph
+        if local in BODY_TAGS:
+            break         # reached body without finding a tracked change
+        node = node.getparent()
+
+    return False
 
 
 def collect_consecutive_del(

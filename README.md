@@ -15,6 +15,7 @@ Both modes run the same underlying pipeline: parse → extract → classify → 
 
 - **PyQt6 GUI** with a scrollable settings panel, hierarchical change-type filter tree, and real-time status feedback.
 - **Excel output** (`.xlsx`) generated either from scratch or by filling in a pre-existing CPA template workbook.
+- **Delete Toggle Feature** — Optional toggle column in Excel output with TRUE/FALSE dropdowns for marking rows for deletion. Includes auto-delete watcher, batch deletion with automatic backup, and GUI integration. See [DELETE_TOGGLE_GUIDE.md](DELETE_TOGGLE_GUIDE.md) for complete guide.
 - **Bookmark injection** into an annotated copy of the source `.docx`, enabling Excel `HYPERLINK()` formulas to jump directly to each change location.
 - **Inline word-level diff highlighting** for *Modify Content* rows — deleted words in red, inserted words in green, unchanged words in black.
 - **Image extraction and embedding** — images inside `<w:ins>` / `<w:del>` elements are extracted and embedded directly into Excel cells, with configurable dimensions and size modes.
@@ -239,6 +240,12 @@ The main window is divided into three zones:
 │  │ Sheet:    [combo] │ │                                         │
 │  │ Col mapping …     │ │                                         │
 │  └───────────────────┘ │                                         │
+│                        │                                         │
+│  ┌ Delete Toggle ────┐ │                                         │
+│  │ ☑ Enable Toggle   │ │                                         │
+│  │ Column: [E]       │ │                                         │
+│  │ [Delete Toggled…] │ │                                         │
+│  └───────────────────┘ │                                         │
 ├────────────────────────┴─────────────────────────────────────────┤
 │  [ Reset to Default ]          [ Save Config ]  [ ▶  Run ]       │  ← Action Bar
 ├──────────────────────────────────────────────────────────────────┤
@@ -268,6 +275,13 @@ The main window is divided into three zones:
 - **Template / Sheet selectors** — populated from the available `.xlsx` files in `assets/CPA_template/` and the sheets within the selected template.
 - **Column mapping** — four letter fields (Heading, Change Type, Old Content, New Content) specifying the Excel column for each output field.
 - **Manage Template Profiles…** — opens a dialog to add, edit, or delete per-sheet column-mapping profiles that are persisted across sessions.
+
+**Delete Toggle Feature**
+- **Enable Delete Toggle Column** — when checked, adds a toggle column with TRUE/FALSE dropdowns to the Excel output for marking rows for deletion.
+- **Toggle Column** — Excel column letter where the toggle column will be added (default: "E").
+- **Delete Toggled Rows from Excel…** — opens a file dialog to select an Excel file with toggle column, shows a summary of rows marked for deletion, and batch-deletes them with automatic backup creation.
+- **Auto-Delete Watcher** — Run `python auto_delete_watcher.py <excel_file>` to automatically delete rows when you save Excel (recommended for best user experience).
+- See [DELETE_TOGGLE_GUIDE.md](DELETE_TOGGLE_GUIDE.md) for complete guide with all methods, workflows, and troubleshooting.
 
 ### Change Type Tree (Right)
 
@@ -327,6 +341,7 @@ The configuration file is auto-generated on first save. A typical file looks lik
   "selected_change_types": ["Add Content", "Delete Content", "Modify Content", "..."],
   "include_hf_changes": true,
   "include_sdt": true,
+  "include_caption_changes": false,
   "output_mode": "scratch",
   "selected_template": "",
   "template_profiles": {
@@ -336,7 +351,9 @@ The configuration file is auto-generated on first save. A typical file looks lik
   },
   "template_selected_sheets": {
     "CPA_Template_noAutoCount.xlsx": "CPA_JPN"
-  }
+  },
+  "enable_delete_toggle": false,
+  "delete_toggle_column": "E"
 }
 ```
 
@@ -488,6 +505,43 @@ All change types are defined as string constants on the `ChangeType` class in `c
 | Change Type | `ChangeType` Constant | Description |
 |---|---|---|
 | Unknown | `UNKNOWN` | `<w:rPrChange>` present but no classifiable property change detected. Always included in output regardless of filter settings. |
+
+## Delete Toggle Feature
+
+The Delete Toggle feature provides a workflow for filtering Excel output by marking unwanted rows for deletion. This is particularly useful for large change reports where manual review is needed.
+
+### Quick Start
+
+1. **Enable in GUI**: Check "Enable Delete Toggle Column" in the Delete Toggle Feature section
+2. **Run Pipeline**: Generate Excel output as normal - it will include a toggle column
+3. **Mark Rows**: Open the Excel file and set toggle to TRUE for rows you want to delete
+4. **Delete**: Click "Delete Toggled Rows from Excel..." in the GUI, select the file, and confirm
+
+### Features
+
+- **Dropdown Validation**: Toggle column uses Excel data validation with TRUE/FALSE dropdown
+- **Batch Deletion**: Delete all marked rows in one operation
+- **Automatic Backup**: Creates `.backup.xlsx` before modifying files
+- **Summary Preview**: Shows count of rows to be deleted before confirmation
+- **Column Removal**: Option to remove toggle column after deletion
+- **Command-Line Tools**: Standalone CLI for adding toggle columns, showing summaries, and deleting rows
+- **Python API**: Programmatic access for custom workflows
+
+### Detailed Documentation
+
+For complete usage instructions, workflow examples, troubleshooting, and API reference, see:
+- **[DELETE_TOGGLE_GUIDE.md](DELETE_TOGGLE_GUIDE.md)** — Complete delete toggle feature guide (all methods consolidated)
+
+### Testing
+
+The delete toggle feature includes comprehensive test coverage:
+
+```bash
+# Run all delete toggle tests
+python -m pytest tests/test_delete_toggle.py -v
+
+# Expected: 16 tests covering all functionality
+```
 
 ## Output Format
 

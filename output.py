@@ -13,12 +13,18 @@ from pathlib import Path
 from copy import copy
 
 import openpyxl
-from openpyxl.styles import Font, PatternFill
+from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.cell.rich_text import CellRichText, TextBlock, InlineFont
 from openpyxl.drawing.image import Image as XlImage
 from openpyxl.drawing.spreadsheet_drawing import TwoCellAnchor, AnchorMarker, AnchorClientData
 from openpyxl.utils import column_index_from_string, coordinate_to_tuple
 from openpyxl.utils.units import pixels_to_EMU
+
+try:
+    from PIL import Image as PILImage
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
 
 from run_utils import resolve_color
 from constants import (
@@ -31,6 +37,7 @@ from constants import (
     LINE_BREAK_DELIMITER, LINE_BREAK_OUTPUT_DELIMITER,
     IMAGE_PX_MIN, IMAGE_PX_MAX,
 )
+from delete_toggle_feature import add_toggle_column_to_workbook
 
 # AppConfig is imported lazily to avoid a hard dependency when running CLI-only.
 from typing import TYPE_CHECKING
@@ -147,6 +154,39 @@ def _make_diff_rich_text(
     return CellRichText(*old_runs), CellRichText(*new_runs)
 
 
+def _convert_wmf_to_png(image_bytes: bytes) -> bytes:
+    """Convert WMF/EMF image bytes to PNG format.
+    
+    Returns the original bytes if conversion fails or PIL is not available.
+    """
+    if not HAS_PIL:
+        print("[WARNING] PIL/Pillow not available - cannot convert WMF/EMF images")
+        return image_bytes
+    
+    try:
+        # Try to open the image with PIL
+        img = PILImage.open(BytesIO(image_bytes))
+        
+        # Check if it's a WMF or EMF format
+        if img.format in ('WMF', 'EMF'):
+            # Convert to PNG
+            output = BytesIO()
+            # Convert to RGB if necessary (WMF might be in palette mode)
+            if img.mode not in ('RGB', 'RGBA'):
+                img = img.convert('RGB')
+            img.save(output, format='PNG')
+            converted_bytes = output.getvalue()
+            print(f"[INFO] Converted {img.format} image to PNG ({len(image_bytes)} -> {len(converted_bytes)} bytes)")
+            return converted_bytes
+        
+        # Not a WMF/EMF, return original
+        return image_bytes
+    
+    except Exception as e:
+        print(f"[ERROR] Failed to convert image: {e}")
+        return image_bytes
+
+
 def _embed_image(
     ws,
     image_bytes: bytes,
@@ -156,30 +196,41 @@ def _embed_image(
 ) -> None:
     """Embed *image_bytes* into *ws* anchored at *cell_address*.
 
-    Uses TwoCellAnchor with fLocksWithSheet so the image hides with its row
-    when rows are filtered, instead of floating freely over other rows.
+    Uses TwoCellAnchor to properly anchor the image to cells so it moves when rows are deleted.
+    
+    Automatically converts WMF/EMF images to PNG format as openpyxl doesn't support them.
     """
-    img = XlImage(BytesIO(image_bytes))
-    img.width  = width_px
-    img.height = height_px
+    # Convert WMF/EMF to PNG if needed
+    processed_bytes = _convert_wmf_to_png(image_bytes)
+    
+    try:
+        img = XlImage(BytesIO(processed_bytes))
+        img.width  = width_px
+        img.height = height_px
 
-    row, col = coordinate_to_tuple(cell_address.upper())  # 1-based
-
-    # _from: top-left corner of the target cell (zero offset).
-    # to: bottom-right extent of the image within the same cell (in EMU).
-    from_marker = AnchorMarker(col=col - 1, colOff=0, row=row - 1, rowOff=0)
-    to_marker   = AnchorMarker(col=col - 1, colOff=pixels_to_EMU(width_px),
-                               row=row - 1, rowOff=pixels_to_EMU(height_px))
-
-    anchor            = TwoCellAnchor(editAs="twoCell")
-    anchor._from      = from_marker
-    anchor.to         = to_marker
-    # fLocksWithSheet=True causes Excel to hide the image when its row is
-    # filtered out, preventing images from floating over unrelated rows.
-    anchor.clientData = AnchorClientData(fLocksWithSheet=True)
-
-    img.anchor = anchor
-    ws.add_image(img)
+        # Get the cell coordinates
+        row, col = coordinate_to_tuple(cell_address)
+        
+        # Create proper two-cell anchor so image moves with rows
+        # The image spans from the top-left of the cell to bottom-right
+        from_marker = AnchorMarker(col=col-1, colOff=0, row=row-1, rowOff=0)
+        
+        # Calculate end position (same cell, bottom-right corner)
+        # Convert pixels to EMU (English Metric Units) for Excel
+        width_emu = pixels_to_EMU(width_px)
+        height_emu = pixels_to_EMU(height_px)
+        
+        # End marker is in the same cell but offset by image size
+        to_marker = AnchorMarker(col=col-1, colOff=width_emu, row=row-1, rowOff=height_emu)
+        
+        # Create anchor with editAs="oneCell" so image moves and sizes with the cell
+        img.anchor = TwoCellAnchor(editAs="oneCell", _from=from_marker, to=to_marker)
+        
+        # Add the image with proper anchoring
+        ws.add_image(img)
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to embed image at {cell_address}: {e}")
 
 
 def _calculate_image_dimensions(
@@ -210,12 +261,17 @@ def _calculate_row_height(image_height_px: int, default_image_height_px: int) ->
     The default row height is derived from the default image height, so the row height
     always scales from the configured image size rather than a separate row-height setting.
     """
-    # Excel row height is approximately 0.75 times the pixel height, plus a small padding.
-    default_row_height_pt = int(default_image_height_px * 0.75) + 20
-    calculated_height_pt = int(image_height_px * 0.75) + 20
-    if calculated_height_pt >= IMAGE_ROW_HEIGHT_MIN and calculated_height_pt <= IMAGE_ROW_HEIGHT_MAX:
-        return calculated_height_pt
-    return default_row_height_pt
+    # Excel row height: convert pixels to points (1 point = 1.333 pixels approximately)
+    # Add extra padding to ensure image fits comfortably
+    calculated_height_pt = int(image_height_px * 0.75) + 30
+    
+    # Clamp to valid range
+    if calculated_height_pt < IMAGE_ROW_HEIGHT_MIN:
+        return IMAGE_ROW_HEIGHT_MIN
+    if calculated_height_pt > IMAGE_ROW_HEIGHT_MAX:
+        return IMAGE_ROW_HEIGHT_MAX
+    
+    return calculated_height_pt
 
 
 def _format_content(text: str, empty_field: str) -> str:
@@ -382,6 +438,9 @@ def generate_excel_output(
 
     # Hyperlink font style (blue + underline, like a real hyperlink)
     hyperlink_font = Font(color="0563C1", underline="single")
+    
+    # Center alignment for all cells (horizontal and vertical)
+    center_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
     for r in records:
         row_idx = ws.max_row + 1
@@ -389,6 +448,10 @@ def generate_excel_output(
         new_text = _format_content(r.new_text, empty_field)
 
         ws.append([_build_heading_cell_value(r, abs_annotated), r.change_type, old_text, new_text])
+
+        # Apply center alignment to all cells in the row
+        for col in range(1, 5):
+            ws.cell(row=row_idx, column=col).alignment = center_alignment
 
         # Style the heading cell to look like a hyperlink
         if r.bookmark_id is not None:
@@ -404,6 +467,12 @@ def generate_excel_output(
             if cell.data_type == "f":
                 cell.data_type = "s"        # change data type to literal string
                 cell.quotePrefix = True     # add single quote prefix, e.g. ('=0)
+
+    # Add delete toggle column if enabled
+    if config and config.enable_delete_toggle:
+        toggle_col = config.delete_toggle_column
+        add_toggle_column_to_workbook(ws, start_row=2, toggle_col=toggle_col)
+        print(f"[INFO] Delete toggle column '{toggle_col}' added to output")
 
     wb.save(out_path)
     print(f"[INFO] Excel output saved to: {out_path}")
@@ -456,6 +525,9 @@ def generate_excel_from_template(
     col_heading, col_change_type, col_old, col_new = col_idx
 
     abs_annotated  = Path(annotated_docx_path).name
+    
+    # Center alignment for all cells (horizontal and vertical)
+    center_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
     # Start writing from row 2; row 1 is the template header — never touch it.
     next_row = 2
@@ -470,6 +542,10 @@ def generate_excel_from_template(
         ws.cell(row=row_idx, column=col_change_type).value = r.change_type
         ws.cell(row=row_idx, column=col_old).value         = old_text
         ws.cell(row=row_idx, column=col_new).value         = new_text
+
+        # Apply center alignment to all cells in the row
+        for col in [col_heading, col_change_type, col_old, col_new]:
+            ws.cell(row=row_idx, column=col).alignment = center_alignment
 
         # Prevent Excel from treating formula-like text as a formula.
         for col in (col_old, col_new):
@@ -487,6 +563,12 @@ def generate_excel_from_template(
 
         _apply_row_style(ws, row_idx, r, old_text, new_text, del_color, ins_color, eq_color, col_idx)
         _embed_row_images(ws, row_idx, r, img_w, img_h, default_image_height, img_mode, col_idx)
+
+    # Add delete toggle column if enabled
+    if config and config.enable_delete_toggle:
+        toggle_col = config.delete_toggle_column
+        add_toggle_column_to_workbook(ws, start_row=2, toggle_col=toggle_col)
+        print(f"[INFO] Delete toggle column '{toggle_col}' added to template output")
 
     wb.save(out_path)
     print(f"[INFO] Template-based Excel output saved to: {out_path}")

@@ -42,3 +42,8 @@ class ChangeRecord:
     new_image_data: Optional[bytes] = field(default=None, repr=False)
     old_image_size_px: Optional[tuple[int, int]] = field(default=None)
     new_image_size_px: Optional[tuple[int, int]] = field(default=None)
+    # True when the record originates from a paragraph styled as a caption
+    # (e.g. <w:pStyle w:val="Caption">). Used by AppConfig.filter_records()
+    # to optionally suppress caption changes from the output.
+    is_caption:     bool = False
+    is_caption:     bool = False

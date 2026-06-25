@@ -203,6 +203,24 @@ class _PipelineWorker(QThread):
             else:
                 generate_excel_output(all_records, annotated_path, excel_out, config=self._cfg)
 
+            # Add delete toggle column if enabled
+            if self._cfg.enable_delete_toggle:
+                from delete_toggle_feature import add_toggle_column_to_workbook
+                import openpyxl
+                
+                self.log.emit(f"[INFO] Adding delete toggle column '{self._cfg.delete_toggle_column}' ...")
+                wb = openpyxl.load_workbook(excel_out)
+                ws = wb.active
+                add_toggle_column_to_workbook(
+                    ws,
+                    start_row=2,
+                    toggle_col=self._cfg.delete_toggle_column,
+                    header_text="Delete Toggle"
+                )
+                wb.save(excel_out)
+                wb.close()
+                self.log.emit(f"[INFO] Delete toggle column added successfully")
+
             self.finished.emit(True, f"Done! Excel saved to: {excel_out}")
         except Exception as exc:
             self.finished.emit(False, f"[ERROR] {exc}")
@@ -268,6 +286,7 @@ class _SettingsPanel(QWidget):
         layout.addWidget(self._make_color_group())
         self._output_panel = _OutputSettingsPanel(self._cfg)
         layout.addWidget(self._output_panel)
+        layout.addWidget(self._make_toggle_group())
         layout.addStretch()
 
     def _make_text_group(self) -> QGroupBox:
@@ -394,6 +413,91 @@ class _SettingsPanel(QWidget):
         row.addStretch()
         return row, btn, edit
 
+    def _make_toggle_group(self) -> QGroupBox:
+        grp = QGroupBox("Delete Toggle Feature")
+        layout = QVBoxLayout(grp)
+
+        self._enable_toggle_checkbox = QCheckBox("Enable Delete Toggle Column")
+        self._enable_toggle_checkbox.setToolTip(
+            "Add a toggle column to Excel output for marking rows to delete.\n"
+            "Users can set toggle to TRUE/FALSE, then use 'Delete Toggled Rows' to remove marked rows."
+        )
+        layout.addWidget(self._enable_toggle_checkbox)
+
+        col_row = QHBoxLayout()
+        col_row.addWidget(QLabel("Toggle Column:"))
+        self._toggle_col_edit = QLineEdit("E")
+        self._toggle_col_edit.setMaxLength(3)
+        self._toggle_col_edit.setFixedWidth(50)
+        self._toggle_col_edit.setToolTip("Excel column letter for the delete toggle column (e.g., E, F, Z)")
+        col_row.addWidget(self._toggle_col_edit)
+        col_row.addStretch()
+        layout.addLayout(col_row)
+
+        self._delete_toggled_btn = QPushButton("Delete Toggled Rows from Excel...")
+        self._delete_toggled_btn.setToolTip("Open an Excel file and delete rows marked with TRUE in the toggle column")
+        self._delete_toggled_btn.clicked.connect(self._on_delete_toggled_rows)
+        layout.addWidget(self._delete_toggled_btn)
+
+        return grp
+
+    def _on_delete_toggled_rows(self) -> None:
+        """Handle the 'Delete Toggled Rows' button click."""
+        from delete_toggle_feature import delete_toggled_rows, create_delete_toggle_summary
+
+        excel_path, _ = QFileDialog.getOpenFileName(
+            self, "Select Excel File with Toggle Column", "", "Excel Files (*.xlsx)"
+        )
+        if not excel_path:
+            return
+
+        try:
+            # Show summary first
+            toggle_col = self._toggle_col_edit.text().strip().upper() or "E"
+            summary = create_delete_toggle_summary(excel_path, toggle_col=toggle_col)
+            
+            if summary["marked_for_deletion"] == 0:
+                QMessageBox.information(
+                    self, "No Rows to Delete",
+                    f"No rows are marked for deletion (toggle = TRUE).\n\n"
+                    f"Total rows: {summary['total']}"
+                )
+                return
+
+            # Confirm deletion
+            reply = QMessageBox.question(
+                self, "Confirm Deletion",
+                f"Delete {summary['marked_for_deletion']} row(s) marked with TRUE?\n\n"
+                f"Total rows: {summary['total']}\n"
+                f"Marked for deletion: {summary['marked_for_deletion']}\n"
+                f"Will be kept: {summary['kept']}\n\n"
+                f"A backup file will be created automatically.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+            # Perform deletion
+            deleted_count, output_path = delete_toggled_rows(
+                excel_path,
+                toggle_col=toggle_col,
+                remove_toggle_column=True
+            )
+
+            QMessageBox.information(
+                self, "Deletion Complete",
+                f"Successfully deleted {deleted_count} row(s).\n\n"
+                f"Output saved to: {output_path}\n"
+                f"Backup created with .backup.xlsx extension"
+            )
+
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Error",
+                f"Failed to delete toggled rows:\n{str(e)}"
+            )
+
     def apply_to_config(self) -> None:
         self._cfg.empty_field         = self._empty_field_edit.text()
         self._cfg.default_heading     = self._default_heading_edit.text()
@@ -406,6 +510,8 @@ class _SettingsPanel(QWidget):
         self._cfg.diff_del_color      = self._del_edit.text().upper()
         self._cfg.diff_ins_color      = self._ins_edit.text().upper()
         self._cfg.diff_eq_color       = self._eq_edit.text().upper()
+        self._cfg.enable_delete_toggle = self._enable_toggle_checkbox.isChecked()
+        self._cfg.delete_toggle_column = self._toggle_col_edit.text().strip().upper() or "E"
         self._output_panel.apply_to_config()
 
     def is_image_fixed_mode(self) -> bool:
@@ -425,6 +531,8 @@ class _SettingsPanel(QWidget):
         self._del_btn.set_color(self._cfg.diff_del_color)
         self._ins_btn.set_color(self._cfg.diff_ins_color)
         self._eq_btn.set_color(self._cfg.diff_eq_color)
+        self._enable_toggle_checkbox.setChecked(self._cfg.enable_delete_toggle)
+        self._toggle_col_edit.setText(self._cfg.delete_toggle_column)
         self._output_panel.load_from_config()
 
     def validation_errors(self) -> list[str]:
